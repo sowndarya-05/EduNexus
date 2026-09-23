@@ -210,7 +210,42 @@ const updateStudent = async (req, res) => {
         student.parentEmail = parentEmail || student.parentEmail;
         student.parent = parentId;
         student.batch = batch !== undefined ? (batch || null) : student.batch;
-        if (totalFees !== undefined) student.totalFees = totalFees;
+        
+        if (totalFees !== undefined) {
+            const numTotalFees = Number(totalFees) || 0;
+            student.totalFees = numTotalFees;
+            if (!student.fees) student.fees = {};
+            student.fees.totalAmount = numTotalFees;
+
+            const studentFees = await Fee.find({ student: student._id, isDeleted: { $ne: true } });
+            if (studentFees.length === 0) {
+                await Fee.create({
+                    student: student._id,
+                    batch: student.batch || null,
+                    installmentNumber: 1,
+                    amount: numTotalFees,
+                    amountPaid: student.fees.paidAmount || 0,
+                    status: ((student.fees.paidAmount || 0) >= numTotalFees && numTotalFees > 0) ? 'paid' : ((student.fees.paidAmount || 0) > 0 ? 'partially_paid' : 'pending'),
+                    dueDate: new Date()
+                });
+            } else if (studentFees.length === 1) {
+                studentFees[0].amount = numTotalFees;
+                studentFees[0].batch = student.batch || studentFees[0].batch;
+                studentFees[0].recomputeStatus();
+                await studentFees[0].save();
+            } else {
+                const currentTotal = studentFees.reduce((sum, f) => sum + (f.amount || 0), 0);
+                if (currentTotal !== numTotalFees && currentTotal > 0) {
+                    const ratio = numTotalFees / currentTotal;
+                    for (const f of studentFees) {
+                        f.amount = Math.round(f.amount * ratio);
+                        f.batch = student.batch || f.batch;
+                        f.recomputeStatus();
+                        await f.save();
+                    }
+                }
+            }
+        }
 
         const updatedStudent = await student.save();
         res.json(updatedStudent);

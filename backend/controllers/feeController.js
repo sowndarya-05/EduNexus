@@ -320,20 +320,39 @@ const syncFeesAndPayments = async () => {
             const allFees = await Fee.find({ student: s._id });
             let activeFees = allFees.filter(f => !f.isDeleted);
 
+            let expectedFee = s.totalFees || s.fees?.totalAmount || 0;
+            let expectedInst = 1;
+            if (s.batch) {
+                const batchDoc = await Batch.findById(s.batch);
+                if (batchDoc && batchDoc.defaultFeeAmount > 0) {
+                    expectedFee = batchDoc.defaultFeeAmount;
+                    expectedInst = batchDoc.numberOfInstallments || 1;
+                }
+            }
+            if (!expectedFee) expectedFee = 15000;
+
             // Ensure every active student has an active fee record
             if (activeFees.length === 0) {
-                const feeAmount = s.fees?.totalAmount || s.totalFees || 15000;
                 const paidAmount = s.fees?.paidAmount || 0;
                 const newFee = await Fee.create({
                     student: s._id,
                     batch: s.batch || null,
                     installmentNumber: 1,
-                    amount: feeAmount,
+                    amount: expectedFee,
                     amountPaid: paidAmount,
-                    status: (paidAmount >= feeAmount && feeAmount > 0) ? 'paid' : (paidAmount > 0 ? 'partially_paid' : 'pending'),
+                    status: (paidAmount >= expectedFee && expectedFee > 0) ? 'paid' : (paidAmount > 0 ? 'partially_paid' : 'pending'),
                     dueDate: new Date()
                 });
                 activeFees = [newFee];
+            } else if (activeFees.length === 1 && activeFees[0].amount !== expectedFee) {
+                // Reconcile fee amount and batch pointer to match updated batch fee
+                activeFees[0].amount = expectedFee;
+                if (s.batch) activeFees[0].batch = s.batch;
+                activeFees[0].recomputeStatus();
+                await activeFees[0].save();
+            } else if (activeFees.length === 1 && s.batch && String(activeFees[0].batch) !== String(s.batch)) {
+                activeFees[0].batch = s.batch;
+                await activeFees[0].save();
             }
 
             // Sync payments from Payment collection only into active non-deleted fee records
@@ -424,30 +443,12 @@ const getFeeAnalytics = async (req, res) => {
             let studentsPending = 0;
             let studentsUnpaid = 0;
 
+            // 1. Total Collected in selected period:
             if (isAllMonths) {
-                // All-time batch totals
                 for (const fee of fees) {
                     totalCollected += (fee.amountPaid || 0);
-                    totalPending += Math.max(0, (fee.amount || 0) - (fee.amountPaid || 0));
-                }
-
-                for (const s of students) {
-                    const studentFees = fees.filter(f => f.student?.toString() === s._id.toString());
-                    if (studentFees.length === 0) continue;
-
-                    const totalAmount = studentFees.reduce((sum, f) => sum + (f.amount || 0), 0);
-                    const paidAmount = studentFees.reduce((sum, f) => sum + (f.amountPaid || 0), 0);
-
-                    if (paidAmount >= totalAmount && totalAmount > 0) {
-                        studentsPaid++;
-                    } else if (paidAmount > 0) {
-                        studentsPending++;
-                    } else {
-                        studentsUnpaid++;
-                    }
                 }
             } else {
-                // 1. Total Collected strictly in this selected month:
                 for (const fee of fees) {
                     for (const p of (fee.paymentHistory || [])) {
                         const pDate = new Date(p.date);
@@ -457,7 +458,6 @@ const getFeeAnalytics = async (req, res) => {
                     }
                 }
 
-                // Also check Payment collection for payments strictly in this month
                 const paymentsInMonth = await Payment.find({
                     student: { $in: studentIds },
                     date: { $gte: startOfMonth, $lte: endOfMonth },
@@ -472,34 +472,27 @@ const getFeeAnalytics = async (req, res) => {
                         totalCollected += (p.amount || 0);
                     }
                 }
+            }
 
-                // 2. Fees due or active in this specific month:
-                for (const s of students) {
-                    const studentFees = fees.filter(f => f.student?.toString() === s._id.toString());
-                    
-                    const monthFees = studentFees.filter(f => {
-                        const d = new Date(f.dueDate);
-                        const dueInMonth = d >= startOfMonth && d <= endOfMonth;
-                        const paidInMonth = (f.paymentHistory || []).some(p => new Date(p.date) >= startOfMonth && new Date(p.date) <= endOfMonth);
-                        return dueInMonth || paidInMonth;
-                    });
+            // 2. Total Pending & Student Status Counts:
+            for (const s of students) {
+                const studentFees = fees.filter(f => f.student?.toString() === s._id.toString());
+                const totalAmount = studentFees.length > 0 
+                    ? studentFees.reduce((sum, f) => sum + (f.amount || 0), 0)
+                    : (s.fees?.totalAmount || s.totalFees || 0);
+                const paidAmount = studentFees.length > 0
+                    ? studentFees.reduce((sum, f) => sum + (f.amountPaid || 0), 0)
+                    : (s.fees?.paidAmount || 0);
 
-                    if (monthFees.length === 0) {
-                        continue;
-                    }
+                const remaining = Math.max(0, totalAmount - paidAmount);
+                totalPending += remaining;
 
-                    const monthTotal = monthFees.reduce((sum, f) => sum + (f.amount || 0), 0);
-                    const monthPaid = monthFees.reduce((sum, f) => sum + (f.amountPaid || 0), 0);
-                    const remaining = Math.max(0, monthTotal - monthPaid);
-                    totalPending += remaining;
-
-                    if (monthPaid >= monthTotal && monthTotal > 0) {
-                        studentsPaid++;
-                    } else if (monthPaid > 0) {
-                        studentsPending++;
-                    } else {
-                        studentsUnpaid++;
-                    }
+                if (paidAmount >= totalAmount && totalAmount > 0) {
+                    studentsPaid++;
+                } else if (paidAmount > 0) {
+                    studentsPending++;
+                } else {
+                    studentsUnpaid++;
                 }
             }
 

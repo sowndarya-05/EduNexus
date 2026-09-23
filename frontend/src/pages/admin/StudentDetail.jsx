@@ -57,8 +57,11 @@ const StudentDetail = () => {
         </DashboardLayout>
     );
 
-    const totalPaid = payments.reduce((acc, p) => acc + p.amount, 0);
-    const pendingFees = (student.totalFees || 0) - totalPaid;
+    const studentTotalFee = student.fees?.totalAmount || student.totalFees || 0;
+    const studentPaidFee = payments.length > 0 
+        ? payments.reduce((acc, p) => acc + (p.amount || 0), 0) 
+        : (student.fees?.paidAmount || 0);
+    const pendingFees = Math.max(0, studentTotalFee - studentPaidFee);
 
     return (
         <DashboardLayout user={user}>
@@ -113,8 +116,8 @@ const StudentDetail = () => {
                 {/* Stats */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                     <StatCard label="Attendance" value={`${student.attendancePercentage?.toFixed(1) || 0}%`} change={student.attendancePercentage >= 75 ? "Target Met" : "Below Target"} changeType={student.attendancePercentage >= 75 ? "positive" : "negative"} icon={FaChartLine} color="blue" />
-                    <StatCard label="Total Paid" value={`₹${totalPaid}`} change="Contribution" changeType="neutral" icon={FaCheckCircle} color="green" />
-                    <StatCard label="Pending Fees" value={`₹${pendingFees}`} change={pendingFees > 0 ? "Outstanding" : "Cleared"} changeType={pendingFees > 0 ? "negative" : "positive"} icon={FaExclamationTriangle} color={pendingFees > 0 ? "orange" : "green"} />
+                    <StatCard label="Total Paid" value={`₹${studentPaidFee?.toLocaleString()}`} change="Contribution" changeType="neutral" icon={FaCheckCircle} color="green" />
+                    <StatCard label="Pending Fees" value={`₹${pendingFees?.toLocaleString()}`} change={pendingFees > 0 ? "Outstanding" : "Cleared"} changeType={pendingFees > 0 ? "negative" : "positive"} icon={FaExclamationTriangle} color={pendingFees > 0 ? "orange" : "green"} />
                     <StatCard label="Primary Batch" value={student.batch?.name || 'N/A'} change="Active Entry" changeType="neutral" icon={FaLayerGroup} color="purple" />
                 </div>
 

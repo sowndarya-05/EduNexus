@@ -5,6 +5,7 @@ const Attendance = require('../models/Attendance');
 const Payment = require('../models/Payment');
 const Fee = require('../models/Fee');
 const PDFDocument = require('pdfkit');
+const { syncFeesAndPayments } = require('./feeController');
 
 // Helper email validator
 const isValidEmail = (email) => {
@@ -16,6 +17,10 @@ const isValidEmail = (email) => {
 // @access  Private (Admin)
 const getDashboardSummary = async (req, res) => {
     try {
+        if (typeof syncFeesAndPayments === 'function') {
+            await syncFeesAndPayments();
+        }
+
         // 1. Active Students Count
         const activeStudents = await Student.countDocuments({ isDeleted: { $ne: true } });
 
@@ -647,15 +652,20 @@ const updateBatch = async (req, res) => {
         if (name) batch.name = name;
         if (timing) batch.timing = timing;
         
+        let feeChanged = false;
         if (defaultFeeAmount !== undefined && defaultFeeAmount !== null) {
             const feeNum = Number(defaultFeeAmount);
             if (!isNaN(feeNum) && feeNum > 0) {
+                if (batch.defaultFeeAmount !== feeNum) feeChanged = true;
                 batch.defaultFeeAmount = feeNum;
             }
         }
         
+        let installmentsChanged = false;
         if (numberOfInstallments) {
-            batch.numberOfInstallments = Number(numberOfInstallments);
+            const instNum = Number(numberOfInstallments);
+            if (batch.numberOfInstallments !== instNum) installmentsChanged = true;
+            batch.numberOfInstallments = instNum;
         }
 
         // Handle teacher assignment
@@ -678,6 +688,70 @@ const updateBatch = async (req, res) => {
         }
 
         await batch.save();
+
+        // When batch fee amount or installments change, sync enrolled students and their fee records!
+        if (feeChanged || installmentsChanged) {
+            const newFeeAmount = batch.defaultFeeAmount;
+            const newInstCount = batch.numberOfInstallments || 1;
+            
+            const enrolledStudents = await Student.find({ batch: batch._id, isDeleted: { $ne: true } });
+            
+            for (const student of enrolledStudents) {
+                const studentFees = await Fee.find({ student: student._id, isDeleted: { $ne: true } });
+                const totalPaidSoFar = studentFees.reduce((sum, f) => sum + (f.amountPaid || 0), 0);
+
+                if (totalPaidSoFar === 0) {
+                    await Fee.deleteMany({ student: student._id });
+                    
+                    const feeDocs = [];
+                    const baseInst = Math.floor(newFeeAmount / newInstCount);
+                    const remainder = newFeeAmount - (baseInst * newInstCount);
+
+                    for (let i = 0; i < newInstCount; i++) {
+                        const dueDate = new Date();
+                        dueDate.setDate(dueDate.getDate() + (i * 30));
+                        const amt = (i === 0) ? (baseInst + remainder) : baseInst;
+
+                        feeDocs.push({
+                            student: student._id,
+                            batch: batch._id,
+                            installmentNumber: i + 1,
+                            amount: amt,
+                            amountPaid: 0,
+                            status: 'pending',
+                            dueDate
+                        });
+                    }
+                    if (feeDocs.length > 0) {
+                        await Fee.insertMany(feeDocs);
+                    }
+                } else if (studentFees.length === 1) {
+                    studentFees[0].amount = newFeeAmount;
+                    studentFees[0].batch = batch._id;
+                    studentFees[0].recomputeStatus();
+                    await studentFees[0].save();
+                } else if (studentFees.length > 0) {
+                    const currentTotal = studentFees.reduce((sum, f) => sum + (f.amount || 0), 0);
+                    if (currentTotal > 0 && currentTotal !== newFeeAmount) {
+                        const ratio = newFeeAmount / currentTotal;
+                        for (const f of studentFees) {
+                            f.amount = Math.round(f.amount * ratio);
+                            f.batch = batch._id;
+                            f.recomputeStatus();
+                            await f.save();
+                        }
+                    }
+                }
+
+                student.totalFees = newFeeAmount;
+                if (!student.fees) student.fees = {};
+                student.fees.totalAmount = newFeeAmount;
+                student.fees.paidAmount = totalPaidSoFar;
+                student.fees.status = totalPaidSoFar >= newFeeAmount && newFeeAmount > 0 ? 'paid' : (totalPaidSoFar > 0 ? 'partially_paid' : 'pending');
+                await student.save();
+            }
+        }
+
         res.json(batch);
     } catch (error) {
         res.status(400).json({ message: error.message });

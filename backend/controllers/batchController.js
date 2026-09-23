@@ -1,4 +1,6 @@
 const Batch = require('../models/Batch');
+const Student = require('../models/Student');
+const Fee = require('../models/Fee');
 
 // @desc    Create a batch
 // @route   POST /api/batches
@@ -106,10 +108,88 @@ const updateBatch = async (req, res) => {
             batch.timing = timing || batch.timing;
             batch.teacher = teacher || batch.teacher;
             batch.subject = subject || batch.subject;
-            if (defaultFeeAmount !== undefined) batch.defaultFeeAmount = Number(defaultFeeAmount);
-            if (numberOfInstallments !== undefined) batch.numberOfInstallments = Number(numberOfInstallments);
+
+            let feeChanged = false;
+            let installmentsChanged = false;
+
+            if (defaultFeeAmount !== undefined && defaultFeeAmount !== null) {
+                const feeNum = Number(defaultFeeAmount);
+                if (!isNaN(feeNum) && feeNum > 0) {
+                    if (batch.defaultFeeAmount !== feeNum) feeChanged = true;
+                    batch.defaultFeeAmount = feeNum;
+                }
+            }
+            if (numberOfInstallments !== undefined && numberOfInstallments !== null) {
+                const instNum = Number(numberOfInstallments);
+                if (!isNaN(instNum) && instNum > 0) {
+                    if (batch.numberOfInstallments !== instNum) installmentsChanged = true;
+                    batch.numberOfInstallments = instNum;
+                }
+            }
 
             const updatedBatch = await batch.save();
+
+            // Sync enrolled students fee records if fee changed
+            if (feeChanged || installmentsChanged) {
+                const newFeeAmount = updatedBatch.defaultFeeAmount;
+                const newInstCount = updatedBatch.numberOfInstallments || 1;
+                const enrolledStudents = await Student.find({ batch: updatedBatch._id, isDeleted: { $ne: true } });
+
+                for (const student of enrolledStudents) {
+                    const studentFees = await Fee.find({ student: student._id, isDeleted: { $ne: true } });
+                    const totalPaidSoFar = studentFees.reduce((sum, f) => sum + (f.amountPaid || 0), 0);
+
+                    if (totalPaidSoFar === 0) {
+                        await Fee.deleteMany({ student: student._id });
+                        const feeDocs = [];
+                        const baseInst = Math.floor(newFeeAmount / newInstCount);
+                        const remainder = newFeeAmount - (baseInst * newInstCount);
+
+                        for (let i = 0; i < newInstCount; i++) {
+                            const dueDate = new Date();
+                            dueDate.setDate(dueDate.getDate() + (i * 30));
+                            const amt = (i === 0) ? (baseInst + remainder) : baseInst;
+
+                            feeDocs.push({
+                                student: student._id,
+                                batch: updatedBatch._id,
+                                installmentNumber: i + 1,
+                                amount: amt,
+                                amountPaid: 0,
+                                status: 'pending',
+                                dueDate
+                            });
+                        }
+                        if (feeDocs.length > 0) {
+                            await Fee.insertMany(feeDocs);
+                        }
+                    } else if (studentFees.length === 1) {
+                        studentFees[0].amount = newFeeAmount;
+                        studentFees[0].batch = updatedBatch._id;
+                        studentFees[0].recomputeStatus();
+                        await studentFees[0].save();
+                    } else if (studentFees.length > 0) {
+                        const currentTotal = studentFees.reduce((sum, f) => sum + (f.amount || 0), 0);
+                        if (currentTotal > 0 && currentTotal !== newFeeAmount) {
+                            const ratio = newFeeAmount / currentTotal;
+                            for (const f of studentFees) {
+                                f.amount = Math.round(f.amount * ratio);
+                                f.batch = updatedBatch._id;
+                                f.recomputeStatus();
+                                await f.save();
+                            }
+                        }
+                    }
+
+                    student.totalFees = newFeeAmount;
+                    if (!student.fees) student.fees = {};
+                    student.fees.totalAmount = newFeeAmount;
+                    student.fees.paidAmount = totalPaidSoFar;
+                    student.fees.status = totalPaidSoFar >= newFeeAmount && newFeeAmount > 0 ? 'paid' : (totalPaidSoFar > 0 ? 'partially_paid' : 'pending');
+                    await student.save();
+                }
+            }
+
             res.json(updatedBatch);
         } else {
             res.status(404).json({ message: 'Batch not found' });

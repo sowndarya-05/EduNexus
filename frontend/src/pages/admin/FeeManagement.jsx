@@ -303,7 +303,8 @@ const FeeManagement = () => {
             pending: 'bg-blue-50 text-blue-700 border-blue-200/60',
             overdue: 'bg-rose-50 text-rose-700 border-rose-200/60'
         };
-        return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${colors[s] || 'bg-slate-50'}`}>${status?.replace('_', ' ')}</span>;
+        const label = s ? s.charAt(0).toUpperCase() + s.slice(1).replace('_', ' ') : 'Pending';
+        return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${colors[s] || 'bg-slate-50'}`}>{label}</span>;
     };
 
     const chartData = useMemo(() => [
